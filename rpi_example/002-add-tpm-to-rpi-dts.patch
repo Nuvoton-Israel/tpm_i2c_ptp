@@ -1,0 +1,18 @@
+diff --git a/arch/arm/boot/dts/bcm283x.dtsi b/arch/arm/boot/dts/bcm283x.dtsi
+index 31b2964..c6c96fc 100644
+--- a/arch/arm/boot/dts/bcm283x.dtsi
++++ b/arch/arm/boot/dts/bcm283x.dtsi
+@@ -573,6 +573,13 @@
+ 			#address-cells = <1>;
+ 			#size-cells = <0>;
+ 			status = "disabled";
++
++			tpm_i2c_ptp: tpm_i2c_ptp@2e {
++
++				compatible = "tcg,tpm_i2c_ptp";
++				reg = <0x2e>;
++				tpm-pirq = <&gpio 24 GPIO_ACTIVE_HIGH>;
++			};
+ 		};
+ 
+ 		i2c2: i2c@7e805000 {

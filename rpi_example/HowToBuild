@@ -1,0 +1,139 @@
+===============================================================================
+  Nuvoton Technology Corporation 
+  TPM I2C Driver
+  Build instructions for BCM2708 (Raspberry-Pi 3)
+  Copyright (c) 2019 Nuvoton Technology Corporation. All Rights Reserved.
+===============================================================================
+
+Raspberry PI Bring-Up
+---------------------
+1 Download the Ubuntu Mate image on SD card
+
+2 Go to: https://www.raspberrypi.org/downloads/ and download Ubuntu Mate
+
+3 Format the SD card by using SDFormatter or equivalent
+
+4 Move the .img file to the SD card using "Win 32 Disk Imager" or equivalent
+
+5 Plug the SD card into the Rpi
+
+6 Set network (WIFI or Ethernet)
+
+7 Update and upgrade:
+	sudo apt-get update
+	sudo apt-get upgrade
+  At the end of the upgrade, choose "default"
+ 
+8 If you would like to use Firefox and it fails to open after the update
+  perform Firefox downgrade:
+	sudo apt-get install firefox=45.0.2+build1-0ubuntu1
+	sudo apt-mark hold firefox
+  Or install Google Chromium:
+	sudo apt-get install chromium-browser --yes
+
+9 Install the required tools:
+	sudo apt-get install git bc i2c-tools libncurses5-dev bison libssl-dev
+
+10 To enable I2C, move the SD card to your PC using card reader, open
+   config.txt for editing and add the following line:
+	dtparam=i2c_arm=on
+   
+   Note: If the line already exists, verify that '#' is removed and that it is
+         set to 'on'
+
+
+
+Build and Install Kernel
+------------------------
+1 Create a new directory 'linux_from_rpi' and get the Linux kernel 5.0.y
+  sources (from linux_from_rpi):
+	git clone --depth=1 https://github.com/raspberrypi/linux -b rpi-5.0.y
+
+2 Set the RPI configuration:
+	cd linux
+	KERNEL=kernel7
+	make bcm2709_defconfig
+
+3 Apply the attached patches:
+	git apply 001-add-tpm_i2c_ptp.patch
+	git apply 002-add-tpm-to-rpi-dts.patch
+
+4 Add (or replace exists) the attached tpm_i2c_ptp.c
+
+5 Use menuconfig to set the TPM HW
+ a) From the root directory of the sources (linux_for_rpi\linux) run:
+	make menuconfig
+ b) Move to: Device Drivers->Character devices>
+ c) Set "TPM Hardware Support" to the module by clicking "M" and enter its menu
+ d) Under TPM Hardware Support you will see a list of supported TPMs. Make
+    sure that you set only TCG_TIS_I2C_PTP as a module by clicking "M". If any
+    other TPM is also set, clear it
+
+    Note: Choosing "M" for these modules indicates they will be built as an 
+          external loadable modules. Alternatively, you can choose "Y" for both
+          in order to build the driver into the kernel (then loading the module
+          and its dependencies manually ('Install the TPM Module' section) is
+          not required. However, this option is recommended only after
+          verifying the driver was loaded successfully as an external module.
+
+ e) After setting TCG_TIS_I2C_PTP, TCG_TIS_I2C_PTP_MAX_SIZE will be prompted.
+    In order to bypass RPI issue #254 (clock stretch is not supported), change
+    it to be '15' (or less than 16). On other systems, leave the default.
+    You can also skip this step and set this parameter during module
+    insmod/modprobe, see under 'Install the TPM Module' 
+ f) Save and exit
+
+6 Build the kernel and replace the existing one:
+	make -j4 zImage modules dtbs
+	sudo make modules_install
+	sudo cp arch/arm/boot/dts/*.dtb /boot/
+	sudo cp arch/arm/boot/dts/overlays/*.dtb* /boot/overlays/
+	sudo cp arch/arm/boot/dts/overlays/README /boot/overlays/
+	sudo cp arch/arm/boot/zImage /boot/$KERNEL.img
+
+7 Reboot the platform
+
+8 Use the command "uname -r" to check the Linux kernel version to make sure you
+  are now running with the new kernel
+
+
+
+Install the TPM Module
+----------------------
+1 Verify that the I2C TPM is identified on the bus:
+	sudo rmmod i2c-dev
+	sudo modprobe --first-time i2c-dev
+	sudo i2cdetect -l
+  You should get a list; one of them is i2c-1. Then run:
+	sudo i2cdetect 1
+  If you see address 0x2e it means that the I2C TPM is identified on the bus
+
+2 From the root directory of the sources (linux_for_rpi\linux):
+	sudo modprobe crc-ccitt
+	sudo insmod drivers/char/tpm/tpm.ko
+	sudo insmod drivers/char/tpm/tpm_i2c_ptp.ko
+  * tpm_i2c_ptp has 'i2c_max_size' parameter which can be set during 'insmod':
+	sudo insmod drivers/char/tpm/tpm_i2c_ptp.ko i2c_max_size=15
+  It should be set on RPI in order to bypass the clock stretch issue when
+  TCG_TIS_I2C_PTP_MAX_SIZE was not confugred (see 'Build and Install Kernel')
+
+  Note: The very first probe after full PU may print warnings (you can see
+        that in the kernel log), since the tpm upper driver expects the TPM to
+        be already 'startuped' by the BIOS, or by any other SW (run_startup
+        python script can be used for that before loading the driver).
+
+3 Verify that the TPM device is installed:
+	ls /dev/tpm0 
+  If tpm0 exists it means that the bring-up is complete
+
+
+
+General
+-------
+- In order to build only the TPM module (after building and installing the
+  kernel), go to 'linux_from_rpi'/linux and run:
+	sudo make SUBDIRS=drivers/char/tpm
+
+- At any stage, you can use the dmseg command to get messages from the kernel:
+	sudo dmesg -c
+
