@@ -31,7 +31,6 @@
 #define TPM_INT_CAPABILITY              0x14
 #define TPM_STS                         0x18
 #define TPM_STS_BURST_COUNT             0x19
-#define TPM_BURST_COUNT                 0x19
 #define TPM_DATA_FIFO                   0x24
 #define TPM_I2C_INTERFACE_CAPABILITY    0x30
 #define TPM_I2C_DEVICE_ADDRESS          0x38
@@ -40,32 +39,16 @@
 #define TPM_VID_DID                     0x48
 #define TPM_RID                         0x4C
 
-/* TPM command header size */
-#define TPM_HEADER_SIZE             10
-#define TPM_RETRY                   5
+ /* max. command/response length */
+#define TPM_I2C_BUFSIZE                 2048
 
-enum tis_defaults {
-	TIS_MEM_LEN = 0x5000,
-	TIS_SHORT_TIMEOUT = 750,	/* ms */
-	TIS_LONG_TIMEOUT = 2000,	/* 2 sec */
-};
+/* I2C bus device maximum buffer size w/o counting I2C address or command */
+#define TPM_I2C_MAX_BUF_SIZE            32
 
-/* Some timeout values are needed before it is known whether the chip is
- * TPM 1.0 or TPM 2.0.
- */
-#define TIS_TIMEOUT_A_MAX	max_t(int, TIS_SHORT_TIMEOUT, TPM2_TIMEOUT_A)
-#define TIS_TIMEOUT_B_MAX	max_t(int, TIS_LONG_TIMEOUT, TPM2_TIMEOUT_B)
-#define TIS_TIMEOUT_C_MAX	max_t(int, TIS_SHORT_TIMEOUT, TPM2_TIMEOUT_C)
-#define TIS_TIMEOUT_D_MAX	max_t(int, TIS_SHORT_TIMEOUT, TPM2_TIMEOUT_D)
-
-/* I2C bus device maximum buffer size w/o counting I2C address or command
- * i.e. max size required for I2C write is 34 = addr, command, 32 bytes data
- */
-#define TPM_I2C_MAX_BUF_SIZE        32
-#define TPM_I2C_BUS_DELAY           1000        /* usec */
-#define TPM_I2C_RETRY_DELAY_SHORT   (2 * 1000)  /* usec */
-#define TPM_I2C_RETRY_DELAY_LONG    (10 * 1000) /* usec */
-#define TPM_I2C_DELAY_RANGE         300         /* usec */
+#define TPM_I2C_MAX_RETRY_CNT           5
+#define TPM_I2C_RETRY_DELAY_SHORT_US    (2 * 1000)
+#define TPM_I2C_RETRY_DELAY_LONG_US     (10 * 1000)
+#define TPM_I2C_DELAY_RANGE_US          300
 
 #define OF_IS_TPM2 ((void *)1)
 #define I2C_IS_TPM2 1
@@ -83,17 +66,9 @@ struct tpm_tis_data {
 	unsigned short rng_quality;
 };
 
-#define TPM_BUFSIZE 2048
-#define MAX_COUNT 3
-#define SLEEP_DURATION_LOW 55
-#define SLEEP_DURATION_HI 65
-#define MAX_COUNT_LONG 50
-#define SLEEP_DURATION_LONG_LOW 200
-#define SLEEP_DURATION_LONG_HI 220
-#define SLEEP_DURATION_RESET_LOW 2400
-#define SLEEP_DURATION_RESET_HI 2600
-#define TPM_TIMEOUT_US_LOW (TPM_TIMEOUT * 1000)
-#define TPM_TIMEOUT_US_HI  (TPM_TIMEOUT_US_LOW + 2000)
+#define MAX_COUNT               3
+#define SLEEP_DURATION_LOW      55
+#define SLEEP_DURATION_HI       65
 
 static int iic_tpm_read(struct i2c_client *client, u8 addr, u8 *buffer,
 			size_t len)
@@ -124,10 +99,10 @@ static int iic_tpm_read(struct i2c_client *client, u8 addr, u8 *buffer,
 	if (rc <= 0)
 		goto out;
 	for (count = 0; count < MAX_COUNT; count++) {
-		usleep_range(SLEEP_DURATION_LOW, SLEEP_DURATION_HI);
 		rc = __i2c_transfer(client->adapter, &msg2, 1);
 		if (rc > 0)
 			break;
+		usleep_range(SLEEP_DURATION_LOW, SLEEP_DURATION_HI);
 	}
 out:
 	i2c_unlock_bus(client->adapter, I2C_LOCK_ROOT_ADAPTER);
@@ -137,7 +112,7 @@ out:
 	return len;
 }
 
-static u8 tpm_dev_buf[TPM_BUFSIZE + sizeof(u8)]; /* max. buffer size + addr */
+static u8 tpm_dev_buf[TPM_I2C_BUFSIZE + sizeof(u8)]; /* max buff size + addr */
 
 #ifdef CONFIG_TCG_TIS_I2C_PTP_MAX_SIZE
 	static int i2c_max_size = CONFIG_TCG_TIS_I2C_PTP_MAX_SIZE;
@@ -179,7 +154,7 @@ static int iic_tpm_write_generic(struct i2c_client *client,
 	return 0;
 }
 
-static s32 i2c_ptp_read_buf(struct i2c_client *client, u8 offset, u8 size,
+static s32 i2c_ptp_read_buf(struct i2c_client *client, u8 offset, size_t size,
 			    u8 *data)
 {
 	s32 status;
@@ -191,7 +166,7 @@ static s32 i2c_ptp_read_buf(struct i2c_client *client, u8 offset, u8 size,
 	return status;
 }
 
-static s32 i2c_ptp_write_buf(struct i2c_client *client, u8 offset, u8 size,
+static s32 i2c_ptp_write_buf(struct i2c_client *client, u8 offset, size_t size,
 			     u8 *data)
 {
 	s32 status;
@@ -234,13 +209,15 @@ int i2c_ptp_wait_for_tpm_stat_l(struct tpm_chip *chip, u8 mask,
 				bool check_cancel)
 {
 	struct tpm_tis_data *priv = dev_get_drvdata(&chip->dev);
-	unsigned long stop;
+	unsigned long stop, start, long_delay;
 	long rc;
 	u8 status;
 	bool canceled = false;
 	unsigned int cur_intrs;
 
-	stop = jiffies + timeout;
+	start = jiffies;
+	stop = start + timeout;
+	long_delay = start + usecs_to_jiffies(TPM_I2C_RETRY_DELAY_LONG_US);
 
 	if (queue && chip->flags & TPM_CHIP_FLAG_IRQ) {
 again:
@@ -268,8 +245,16 @@ again:
 			status = chip->ops->status(chip);
 			if ((status & mask) == mask)
 				return 0;
-			usleep_range(TPM_TIMEOUT_USECS_MIN,
-				     TPM_TIMEOUT_USECS_MAX);
+
+			if (time_before(jiffies, long_delay))
+				usleep_range(TPM_I2C_RETRY_DELAY_SHORT_US,
+					     TPM_I2C_RETRY_DELAY_SHORT_US
+					     + TPM_I2C_DELAY_RANGE_US);
+			else
+				usleep_range(TPM_I2C_RETRY_DELAY_LONG_US,
+					     TPM_I2C_RETRY_DELAY_LONG_US
+					     + TPM_I2C_DELAY_RANGE_US);
+
 		} while (time_before(jiffies, stop));
 	}
 	return -ETIME;
@@ -302,7 +287,8 @@ static int i2c_ptp_wait_for_tpm_stat(struct tpm_chip *chip, u8 mask,
 		}
 
 		/* Clear interrupts handled */
-		rc = i2c_ptp_write_buf(client, TPM_INT_STATUS, 4, (u8 *)&intsts);
+		rc = i2c_ptp_write_buf(client, TPM_INT_STATUS, 4,
+				       (u8 *)&intsts);
 		if (rc < 0) {
 			dev_err(&chip->dev,
 				"%s() fail to clear int status\n", __func__);
@@ -338,7 +324,7 @@ static int wait_startup(struct tpm_chip *chip, int l)
 
 		if (access & TPM_ACCESS_VALID_STS)
 			return 0;
-		msleep(TPM_TIMEOUT);
+		tpm_msleep(TPM_TIMEOUT);
 	} while (time_before(jiffies, stop));
 	return -1;
 }
@@ -349,8 +335,9 @@ static bool i2c_ptp_check_locality(struct tpm_chip *chip, int l)
 	struct tpm_tis_data *priv = dev_get_drvdata(&chip->dev);
 	int rc;
 	u8 access;
-	u8 data = 0;
+	u8 data;
 
+	data = (u8)l;
 	rc = i2c_ptp_write_buf(client, TPM_LOC_SEL, 1, &data);
 	if (rc < 0)
 		return false;
@@ -373,8 +360,9 @@ static bool i2c_ptp_locality_inactive(struct tpm_chip *chip, int l)
 	struct i2c_client *client = to_i2c_client(chip->dev.parent);
 	int rc;
 	u8 access;
-	u8 data = 0;
+	u8 data;
 
+	data = (u8)l;
 	rc = i2c_ptp_write_buf(client, TPM_LOC_SEL, 1, &data);
 	if (rc < 0)
 		return false;
@@ -394,12 +382,8 @@ static int i2c_ptp_release_locality(struct tpm_chip *chip, int l)
 {
 	struct i2c_client *client = to_i2c_client(chip->dev.parent);
 	unsigned long stop;
-	long rc;
-	u8 data = 0;
-
-	rc = i2c_ptp_write_buf(client, TPM_LOC_SEL, 1, &data);
-	if (rc < 0)
-		return rc;
+	int rc;
+	u8 data;
 
 	if (i2c_ptp_locality_inactive(chip, l))
 		return 0;
@@ -423,14 +407,9 @@ static int i2c_ptp_release_locality(struct tpm_chip *chip, int l)
 static int i2c_ptp_request_locality(struct tpm_chip *chip, int l)
 {
 	struct i2c_client *client = to_i2c_client(chip->dev.parent);
-	struct tpm_tis_data *priv = dev_get_drvdata(&chip->dev);
-	unsigned long stop, timeout;
-	long rc;
-	u8 data = 0;
-
-	rc = i2c_ptp_write_buf(client, TPM_LOC_SEL, 1, &data);
-	if (rc < 0)
-		return -1;
+	unsigned long stop;
+	int rc;
+	u8 data;
 
 	if (i2c_ptp_check_locality(chip, l))
 		return l;
@@ -440,37 +419,19 @@ static int i2c_ptp_request_locality(struct tpm_chip *chip, int l)
 	if (rc < 0)
 		return rc;
 
-	if (i2c_ptp_check_locality(chip, l))
-		return l;
-
 	stop = jiffies + chip->timeout_a;
 
-	if ((TPM_INT_TO_ACTIVATE & TPM_INT_LOC_CHANGED) &&
-	    (chip->flags & TPM_CHIP_FLAG_IRQ)) {
-		unsigned int cur_intrs = priv->intrs;
-again:
-		timeout = stop - jiffies;
-		if ((long)timeout <= 0)
-			return -1;
-		enable_irq(priv->irq);
-		rc = wait_event_interruptible_timeout(priv->int_queue,
-						      (cur_intrs != priv->intrs) &&
-						      i2c_ptp_check_locality
-						      (chip, l),
-						      timeout);
-		if (rc > 0)
+	do {
+		if (i2c_ptp_check_locality(chip, l))
 			return l;
-		if (rc == -ERESTARTSYS && freezing(current)) {
-			clear_thread_flag(TIF_SIGPENDING);
-			goto again;
-		}
-	} else {
-		do {
-			if (i2c_ptp_check_locality(chip, l) >= 0)
-				return l;
-			msleep(TPM_TIMEOUT);
-		} while (time_before(jiffies, stop));
-	}
+
+		rc = i2c_ptp_write_buf(client, TPM_ACCESS, 1, &data);
+		if (rc < 0)
+			return rc;
+
+		tpm_msleep(TPM_TIMEOUT);
+	} while (time_before(jiffies, stop));
+
 	return -1;
 }
 
@@ -484,11 +445,7 @@ again:
 #define TPM_STS_COMMAND_CANCEL (BIT(24))
 
 /* bit1...bit0 reads always 0 */
-#define TPM_STS_ERR_VAL		(BIT(0) | BIT(1))
-
-#define TPM_I2C_SHORT_TIMEOUT  750     /* ms */
-#define TPM_I2C_LONG_TIMEOUT   2000    /* 2 sec */
-#define TPM_I2C_LONG_TIMEOUT   2000    /* 2 sec */
+#define TPM_STS_ERR_VAL        (BIT(0) | BIT(1))
 
 /* read TPM_STS register */
 static u8 i2c_ptp_status(struct tpm_chip *chip)
@@ -512,6 +469,31 @@ static void i2c_ptp_ready(struct tpm_chip *chip)
 
 	data = TPM_STS_COMMAND_READY;
 	i2c_ptp_write_buf(client, TPM_STS, 1, &data);
+}
+
+/* read Burst Count */
+static int i2c_ptp_get_burstcount(struct tpm_chip *chip)
+{
+	struct i2c_client *client = to_i2c_client(chip->dev.parent);
+	unsigned long stop;
+	int burstcnt = 0, rc;
+
+	/* wait for burstcount */
+	stop = jiffies + chip->timeout_a;
+
+	do {
+		rc = i2c_ptp_read_buf(client, TPM_STS_BURST_COUNT, 2,
+				      (u8 *)&burstcnt);
+		if (rc < 0)
+			return rc;
+
+		if (burstcnt)
+			return burstcnt;
+
+		usleep_range(TPM_TIMEOUT_USECS_MIN, TPM_TIMEOUT_USECS_MAX);
+	} while (time_before(jiffies, stop));
+
+	return -EBUSY;
 }
 
 /* write commandCancel to TPM_STS register */
@@ -570,23 +552,26 @@ static int i2c_ptp_check_crc(struct tpm_chip *chip, u8 *buf, size_t len)
 static int i2c_ptp_recv_data(struct tpm_chip *chip, u8 *buf, size_t count)
 {
 	struct i2c_client *client = to_i2c_client(chip->dev.parent);
-	int size = 0, bytes2receive, rc;
+	int size = 0, burstcnt, rc, bytes2read = count;
+	bool paramsize_flag = false;
 
-	while (size < count) {
-		rc = i2c_ptp_wait_for_tpm_stat(chip,
-					       TPM_STS_DATA_AVAIL | TPM_STS_VALID,
-					       chip->timeout_c,
-					       NULL, true);
-		if (rc < 0)
-			return rc;
+	while (size < bytes2read) {
+		burstcnt = i2c_ptp_get_burstcount(chip);
+		if (burstcnt <= 0)
+			return burstcnt;
 
-		bytes2receive = min_t(int, i2c_max_size, count - size);
-		rc = i2c_ptp_read_buf(client, TPM_DATA_FIFO, bytes2receive,
+		burstcnt = min_t(int, (bytes2read - size), burstcnt);
+		rc = i2c_ptp_read_buf(client, TPM_DATA_FIFO, burstcnt,
 				      buf + size);
 		if (rc < 0)
 			return rc;
 
-		size += bytes2receive;
+		size += burstcnt;
+
+		if (size >= 6 && !paramsize_flag) {
+			bytes2read = be32_to_cpu(*(__be32 *)(buf + 2));
+			paramsize_flag = true;
+		}
 	}
 
 	return size;
@@ -596,14 +581,16 @@ static int i2c_ptp_recv(struct tpm_chip *chip, u8 *buf, size_t count)
 {
 	struct i2c_client *client = to_i2c_client(chip->dev.parent);
 	int size = 0;
-	int expected, status, retries;
+	int status, retries;
 
 	if (count < TPM_HEADER_SIZE) {
-		size = -EIO;
+		status = -EIO;
 		goto out;
 	}
 
-	for (retries = 0; retries < TPM_RETRY; retries++) {
+	for (retries = 0; retries < TPM_I2C_MAX_RETRY_CNT; retries++) {
+		size = 0;
+
 		if (retries > 0) {
 			/* if this is not the first trial, set responseRetry */
 			u8 data = TPM_STS_RESPONSE_RETRY;
@@ -611,59 +598,35 @@ static int i2c_ptp_recv(struct tpm_chip *chip, u8 *buf, size_t count)
 			i2c_ptp_write_buf(client, TPM_STS, 1, &data);
 		}
 
+		status = i2c_ptp_wait_for_tpm_stat(chip,
+						   (TPM_STS_DATA_AVAIL | TPM_STS_VALID),
+						   chip->timeout_b, NULL,
+						   false);
+		if (status < 0)
+			return status;
+
 		size = i2c_ptp_recv_data(chip, buf, TPM_HEADER_SIZE);
-		/* read first 10 bytes, including tag, paramsize, and result */
-		if (size < TPM_HEADER_SIZE) {
-			dev_err(&chip->dev, "Unable to read header\n");
+		if (size < TPM_HEADER_SIZE)
 			continue;
-		}
 
-		expected = be32_to_cpu(*(__be32 *)(buf + 2));
-		if (expected > count) {
-			size = -EIO;
+		status = i2c_ptp_wait_for_tpm_stat(chip, TPM_STS_VALID,
+						   chip->timeout_a, NULL,
+						   false);
+		if (status < 0)
 			continue;
-		}
 
-		size += i2c_ptp_recv_data(chip, &buf[TPM_HEADER_SIZE],
-					expected - TPM_HEADER_SIZE);
-		if (size < expected) {
-			dev_err(&chip->dev,
-				"Unable to read remainder of result\n");
-			size = -ETIME;
+		/* check CRC */
+		status = i2c_ptp_check_crc(chip, buf, size);
+		if (status < 0)
 			continue;
-		}
 
-		if (i2c_ptp_wait_for_tpm_stat(chip, TPM_STS_VALID,
-					      chip->timeout_c,
-					      NULL, false) < 0) {
-			size = -ETIME;
-			continue;
-		}
-
-		status = i2c_ptp_status(chip);
-		if (status & TPM_STS_DATA_AVAIL) {	/* retry? */
-			dev_err(&chip->dev, "Error left over data\n");
-			size = -EIO;
-			continue;
-		}
+		status = size;
 		break;
-	}
-
-	if (retries >= TPM_RETRY) {
-		size = -EIO;
-		goto out;
-	}
-
-	/* check CRC */
-	status = i2c_ptp_check_crc(chip, buf, size);
-	if (status < 0) {
-		dev_err(&chip->dev, "%s() crc failed\n", __func__);
-		size = -EIO;
 	}
 
 out:
 	i2c_ptp_ready(chip);
-	return size;
+	return status;
 }
 
 /*
@@ -674,7 +637,7 @@ out:
 static int i2c_ptp_send_data(struct tpm_chip *chip, u8 *buf, size_t len)
 {
 	struct i2c_client *client = to_i2c_client(chip->dev.parent);
-	int rc, status, retries;
+	int rc, status, burstcnt, retries;
 	size_t count = 0, bytes2send;
 	u32 ordinal = be32_to_cpu(*((__be32 *)(buf + 6)));
 	u32 intmask;
@@ -683,16 +646,9 @@ static int i2c_ptp_send_data(struct tpm_chip *chip, u8 *buf, size_t len)
 	 * been reset), wait for STS_VALID and re-initialize I2C regs
 	 */
 	if (ordinal == 0x20000201 || ordinal == 0x144) {
-		unsigned long stop = jiffies + chip->timeout_c;
-
 		// wait for I2C to be ready
-		do {
-			u8 status = i2c_ptp_status(chip);
-
-			if (status == TPM_STS_VALID)
-				break;
-			msleep(TPM_TIMEOUT);
-		} while (time_before(jiffies, stop));
+		if (wait_startup(chip, 0) != 0)
+			return -ENODEV;
 
 		rc = i2c_ptp_enable_csum(chip);
 		if (rc < 0) {
@@ -701,81 +657,67 @@ static int i2c_ptp_send_data(struct tpm_chip *chip, u8 *buf, size_t len)
 			return rc;
 		}
 
-		intmask = (TPM_INT_TO_ACTIVATE | TPM_INT_GLOBAL);
-		i2c_ptp_write_buf(client, TPM_INT_ENABLE, 4, (u8 *)&intmask);
-		i2c_ptp_write_buf(client, TPM_INT_STATUS, 4, (u8 *)&intmask);
-	}
-
-	status = i2c_ptp_status(chip);
-	if ((status & TPM_STS_COMMAND_READY) == 0) {
-		i2c_ptp_ready(chip);
-		if (i2c_ptp_wait_for_tpm_stat
-		    (chip, TPM_STS_COMMAND_READY, chip->timeout_b,
-		     NULL, false) < 0) {
-			rc = -ETIME;
-			goto out_err;
+		// in interrupt mode re-eanble and clear the interrupts
+		if (chip->flags & TPM_CHIP_FLAG_IRQ) {
+			intmask = (TPM_INT_TO_ACTIVATE | TPM_INT_GLOBAL);
+			i2c_ptp_write_buf(client, TPM_INT_ENABLE, 4,
+					  (u8 *)&intmask);
+			i2c_ptp_write_buf(client, TPM_INT_STATUS, 4,
+					  (u8 *)&intmask);
 		}
 	}
 
-	rc = 0;
-	for (retries = 0; retries < TPM_RETRY; retries++) {
-		while (count < len - 1) {
-			bytes2send = min_t(int, i2c_max_size, len - count - 1);
+	for (retries = 0; retries < TPM_I2C_MAX_RETRY_CNT; retries++) {
+		count = 0;
+		rc = -1;
+
+		status = i2c_ptp_status(chip);
+		if ((status & TPM_STS_COMMAND_READY) == 0) {
+			i2c_ptp_ready(chip);
+			if (i2c_ptp_wait_for_tpm_stat
+			    (chip, TPM_STS_COMMAND_READY, chip->timeout_b,
+			     NULL, false) < 0) {
+				rc = -ETIME;
+				continue;
+			}
+		}
+
+		while (count < len) {
+			burstcnt = i2c_ptp_get_burstcount(chip);
+			if (burstcnt < 0) {
+				dev_err(&chip->dev, "Unable to read burstcount\n");
+				rc = burstcnt;
+				break;
+			}
+
+			bytes2send = min_t(int, i2c_max_size, burstcnt);
+			bytes2send = min_t(int, bytes2send, (len - count));
 			rc = i2c_ptp_write_buf(client, TPM_DATA_FIFO,
 					       bytes2send, buf + count);
 			if (rc < 0)
 				break;
 
 			count += bytes2send;
-
-			if (i2c_ptp_wait_for_tpm_stat(chip, TPM_STS_VALID,
-						      chip->timeout_c,
-						      NULL, false) < 0) {
-				rc = -ETIME;
-				break;
-			}
-			status = i2c_ptp_status(chip);
-			if ((status & TPM_STS_EXPECT) == 0) {
-				rc = -EIO;
-				break;
-			}
 		}
 
-		if (rc == 0)
-			break;
+		if (rc < 0)
+			continue;
+
+		if (i2c_ptp_wait_for_tpm_stat(chip, TPM_STS_VALID,
+					      chip->timeout_a, NULL,
+					      false) < 0) {
+			rc = -ETIME;
+			continue;
+		}
+
+		/* check CRC */
+		rc = i2c_ptp_check_crc(chip, buf, len);
+		if (rc < 0)
+			continue;
+
+		return 0;
 	}
 
-	if (retries >= TPM_RETRY) {
-		dev_err(&chip->dev, "%s() Unable to send data\n", __func__);
-		goto out_err;
-	}
-
-	/* write last byte */
-	rc = i2c_ptp_write_buf(client, TPM_DATA_FIFO, 1, &buf[count]);
-	if (rc < 0)
-		goto out_err;
-
-	if (i2c_ptp_wait_for_tpm_stat(chip, TPM_STS_VALID, chip->timeout_c,
-				      NULL, false) < 0) {
-		rc = -ETIME;
-		goto out_err;
-	}
-	status = i2c_ptp_status(chip);
-	if ((status & TPM_STS_EXPECT) != 0) {
-		rc = -EIO;
-		goto out_err;
-	}
-
-	/* check CRC */
-	rc = i2c_ptp_check_crc(chip, buf, len);
-	if (rc < 0) {
-		dev_err(&chip->dev, "%s() crc failed\n", __func__);
-		goto out_err;
-	}
-
-	return 0;
-
-out_err:
 	i2c_ptp_ready(chip);
 	return rc;
 }
@@ -826,19 +768,17 @@ static int i2c_ptp_send_main(struct tpm_chip *chip, u8 *buf, size_t len)
 	if (rc < 0)
 		goto out_err;
 
-	if (chip->flags & TPM_CHIP_FLAG_IRQ) {
-		ordinal = be32_to_cpu(*((__be32 *)(buf + 6)));
+	ordinal = be32_to_cpu(*((__be32 *)(buf + 6)));
 
-		dur = tpm_calc_ordinal_duration(chip, ordinal);
-
-		if (i2c_ptp_wait_for_tpm_stat
-		    (chip, TPM_STS_DATA_AVAIL | TPM_STS_VALID, dur,
-		     &priv->int_queue, false) < 0) {
-			rc = -ETIME;
-			goto out_err;
-		}
+	dur = tpm_calc_ordinal_duration(chip, ordinal);
+	if (i2c_ptp_wait_for_tpm_stat
+	    (chip, TPM_STS_DATA_AVAIL | TPM_STS_VALID, dur,
+	     &priv->int_queue, false) < 0) {
+		rc = -ETIME;
+		goto out_err;
 	}
-	return len;
+
+	return 0;
 out_err:
 	i2c_ptp_ready(chip);
 	return rc;
@@ -863,43 +803,6 @@ static int i2c_ptp_send(struct tpm_chip *chip, u8 *buf, size_t len)
 	if (!priv->irq_tested)
 		disable_interrupts(chip);
 	priv->irq_tested = true;
-	return rc;
-}
-
-struct tis_vendor_timeout_override {
-	u32 did_vid;
-	unsigned long timeout_us[4];
-};
-
-static const struct tis_vendor_timeout_override vendor_timeout_overrides[] = {
-	{ 0x32041114, { (TIS_SHORT_TIMEOUT * 1000),
-			(TIS_LONG_TIMEOUT * 1000),
-			(TIS_SHORT_TIMEOUT * 1000),
-			(TIS_SHORT_TIMEOUT * 1000) } },
-};
-
-static bool i2c_ptp_update_timeouts(struct tpm_chip *chip,
-				    unsigned long *timeout_cap)
-{
-	struct i2c_client *client = to_i2c_client(chip->dev.parent);
-	int i, rc;
-	u32 did_vid;
-
-	rc = i2c_ptp_read_buf(client, TPM_VID_DID, 4, (u8 *)&did_vid);
-	if (rc < 0)
-		goto out;
-
-	for (i = 0; i != ARRAY_SIZE(vendor_timeout_overrides); i++) {
-		if (vendor_timeout_overrides[i].did_vid != did_vid)
-			continue;
-		memcpy(timeout_cap, vendor_timeout_overrides[i].timeout_us,
-		       sizeof(vendor_timeout_overrides[i].timeout_us));
-		rc = true;
-	}
-
-	rc = false;
-
-out:
 	return rc;
 }
 
@@ -989,11 +892,8 @@ static int i2c_ptp_probe_irq_single(struct tpm_chip *chip, u32 intmask,
 
 static int i2c_ptp_remove(struct i2c_client *client)
 {
-	struct tpm_chip *chip = i2c_get_clientdata(client);
 	u32 interrupt;
 	int rc;
-
-	tpm_chip_unregister(chip);
 
 	rc = i2c_ptp_read_buf(client, TPM_INT_ENABLE, 4, (u8 *)&interrupt);
 	if (rc < 0)
@@ -1009,11 +909,11 @@ static int i2c_ptp_remove(struct i2c_client *client)
 EXPORT_SYMBOL_GPL(i2c_ptp_remove);
 
 static const struct tpm_class_ops tpm_i2c = {
+	.flags = TPM_OPS_AUTO_STARTUP,
 	.status = i2c_ptp_status,
 	.recv = i2c_ptp_recv,
 	.send = i2c_ptp_send,
 	.cancel = i2c_ptp_cancel,
-	.update_timeouts = i2c_ptp_update_timeouts,
 	.req_complete_mask = TPM_STS_DATA_AVAIL | TPM_STS_VALID,
 	.req_complete_val = TPM_STS_DATA_AVAIL | TPM_STS_VALID,
 	.req_canceled = i2c_ptp_req_canceled,
@@ -1039,10 +939,10 @@ int i2c_ptp_core_init(struct i2c_client *client, struct tpm_tis_data *priv,
 	chip->hwrng.quality = priv->rng_quality;
 
 	/* Maximum timeouts */
-	chip->timeout_a = msecs_to_jiffies(TIS_TIMEOUT_A_MAX);
-	chip->timeout_b = msecs_to_jiffies(TIS_TIMEOUT_B_MAX);
-	chip->timeout_c = msecs_to_jiffies(TIS_TIMEOUT_C_MAX);
-	chip->timeout_d = msecs_to_jiffies(TIS_TIMEOUT_D_MAX);
+	chip->timeout_a = msecs_to_jiffies(TPM2_TIMEOUT_A);
+	chip->timeout_b = msecs_to_jiffies(TPM2_TIMEOUT_B);
+	chip->timeout_c = msecs_to_jiffies(TPM2_TIMEOUT_C);
+	chip->timeout_d = msecs_to_jiffies(TPM2_TIMEOUT_D);
 	priv->phy_ops = phy_ops;
 	priv->intrs = 0;
 	dev_set_drvdata(&chip->dev, priv);
@@ -1066,6 +966,10 @@ int i2c_ptp_core_init(struct i2c_client *client, struct tpm_tis_data *priv,
 		rc = -ENODEV;
 		goto out_err;
 	}
+
+	rc = tpm_chip_start(chip);
+	if (rc)
+		goto out_err;
 
 	rc = tpm2_probe(chip);
 	if (rc)
@@ -1109,6 +1013,7 @@ int i2c_ptp_core_init(struct i2c_client *client, struct tpm_tis_data *priv,
 		goto out_err;
 
 	return 0;
+
 out_err:
 	i2c_ptp_remove(client);
 
