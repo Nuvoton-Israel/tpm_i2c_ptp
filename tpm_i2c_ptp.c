@@ -671,6 +671,11 @@ static int i2c_ptp_send_data(struct tpm_chip *chip, u8 *buf, size_t len)
 		count = 0;
 		rc = -1;
 
+		if (retries > 0) {
+			/* if this is not the first trial, abort the command */
+			i2c_ptp_ready(chip);
+		}
+
 		status = i2c_ptp_status(chip);
 		if ((status & TPM_STS_COMMAND_READY) == 0) {
 			i2c_ptp_ready(chip);
