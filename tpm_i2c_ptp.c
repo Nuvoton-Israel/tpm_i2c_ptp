@@ -195,7 +195,7 @@ static bool wait_for_tpm_stat_cond(struct tpm_chip *chip, u8 mask,
 	u8 status = chip->ops->status(chip);
 
 	*canceled = false;
-	if ((status & mask) == mask)
+	if (status != 0xff && (status & mask) == mask)
 		return true;
 	if (check_cancel && chip->ops->req_canceled(chip, status)) {
 		*canceled = true;
@@ -243,7 +243,7 @@ again:
 	} else {
 		do {
 			status = chip->ops->status(chip);
-			if ((status & mask) == mask)
+			if (status != 0xff && (status & mask) == mask)
 				return 0;
 
 			if (time_before(jiffies, long_delay))
@@ -322,7 +322,7 @@ static int wait_startup(struct tpm_chip *chip, int l)
 		if (rc < 0)
 			return rc;
 
-		if (access & TPM_ACCESS_VALID_STS)
+		if (access != 0xff && (access & TPM_ACCESS_VALID_STS) != 0)
 			return 0;
 		tpm_msleep(TPM_TIMEOUT);
 	} while (time_before(jiffies, stop));
@@ -1095,5 +1095,5 @@ module_i2c_driver(i2c_ptp_driver);
 
 MODULE_AUTHOR("Oshri Alkoby (oshri.alkoby@nuvoton.com)");
 MODULE_DESCRIPTION("TPM I2C Driver");
-MODULE_VERSION("1.0");
+MODULE_VERSION("2.1.2");
 MODULE_LICENSE("GPL");
