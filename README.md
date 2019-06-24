@@ -4,7 +4,7 @@ https://trustedcomputinggroup.org/wp-content/uploads/TCG_PC_Client_Platform_TPM_
 
 This driver was developed and tested with Nuvoton's NPCT7XX, but has been designed to be compatible with any TPM that implements this interface.
 
-The driver is compatible with kernel v5.1. 
+The driver is compatible with kernel v5.2.
 
 ## Content
 - **tpm_i2c_ptp.c** - I2C-based TPM driver source code
@@ -12,7 +12,7 @@ The driver is compatible with kernel v5.1.
 - **README.md** - This descriptive Letter
 
 ## How to use
-- Clone Linux kernel source tree v5.1 to _'myLinux'_
+- Clone Linux kernel source tree v5.2 to _'myLinux'_
 - Apply 001-add-tpm_i2c_ptp.patch
 - Copy tpm_i2c_ptp.c to _'myLinux'_/linux/drivers/char/tpm
 - Add the TPM to your device tree, and set tpm-irq gpio in order to work with host intterrupts (recommended), see instructions and an example in Documentation/devicetree/bindings/security/tpm/tpm-i2c-ptp.txt.

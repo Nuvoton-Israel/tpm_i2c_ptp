@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
-// Copyright (c) 2014-2018 Nuvoton Technology corporation.
-
 /*
+ * Copyright (c) 2014-2019 Nuvoton Technology corporation
+ *
  * TPM I2C PTP
  *
  * TPM I2C Device Driver Interface for devices that implement the TPM I2C
@@ -161,7 +161,7 @@ static s32 i2c_ptp_read_buf(struct i2c_client *client, u8 offset, size_t size,
 
 	status = iic_tpm_read(client, offset, data, size);
 	dev_dbg(&client->dev,
-		"%s(offset=%u size=%u data=%*ph) -> sts=%d\n", __func__,
+		"%s(offset=%u size=%zu data=%*ph) -> sts=%d\n", __func__,
 		offset, size, (int)size, data, status);
 	return status;
 }
@@ -175,7 +175,7 @@ static s32 i2c_ptp_write_buf(struct i2c_client *client, u8 offset, size_t size,
 				       SLEEP_DURATION_LOW, SLEEP_DURATION_HI,
 				       MAX_COUNT);
 	dev_dbg(&client->dev,
-		"%s(offset=%u size=%u data=%*ph) -> sts=%d\n", __func__,
+		"%s(offset=%u size=%zu data=%*ph) -> sts=%d\n", __func__,
 		offset, size, (int)size, data, status);
 
 	return status;
@@ -1095,5 +1095,5 @@ module_i2c_driver(i2c_ptp_driver);
 
 MODULE_AUTHOR("Oshri Alkoby (oshri.alkoby@nuvoton.com)");
 MODULE_DESCRIPTION("TPM I2C Driver");
-MODULE_VERSION("2.1.2");
+MODULE_VERSION("2.1.3");
 MODULE_LICENSE("GPL");
