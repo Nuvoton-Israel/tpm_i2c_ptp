@@ -1,0 +1,47 @@
+From 956999973581a25089b3dac1b785ea37d1ebadd6 Mon Sep 17 00:00:00 2001
+From: Amir Mizinski <amirmizi6@gmail.com>
+Date: Wed, 6 Oct 2021 17:04:52 +0300
+Subject: [PATCH v1 07/12] tpm: Handle an exception for TPM Firmware Update
+ mode.
+
+An extra precaution for TPM Firmware Update Mode.
+For example if TPM power was cut while in Firmware update, platform
+should ignore "selftest" failure and skip TPM initialization sequence.
+
+Suggested-by: Benoit Houyere <benoit.houyere@st.com>
+Signed-off-by: Amir Mizinski <amirmizi6@gmail.com>
+---
+ drivers/char/tpm/tpm2-cmd.c | 4 ++++
+ include/linux/tpm.h         | 1 +
+ 2 files changed, 5 insertions(+)
+
+diff --git a/drivers/char/tpm/tpm2-cmd.c b/drivers/char/tpm/tpm2-cmd.c
+index e71154b..a453b42 100644
+--- a/drivers/char/tpm/tpm2-cmd.c
++++ b/drivers/char/tpm/tpm2-cmd.c
+@@ -727,6 +727,10 @@ int tpm2_auto_startup(struct tpm_chip *chip)
+ 		goto out;
+ 
+ 	rc = tpm2_do_selftest(chip);
++
++	if (rc == TPM2_RC_UPGRADE || rc == TPM2_RC_COMMAND_CODE)
++		return 0;
++
+ 	if (rc && rc != TPM2_RC_INITIALIZE)
+ 		goto out;
+ 
+diff --git a/include/linux/tpm.h b/include/linux/tpm.h
+index 03e9b18..5a2e031 100644
+--- a/include/linux/tpm.h
++++ b/include/linux/tpm.h
+@@ -199,6 +199,7 @@ enum tpm2_return_codes {
+ 	TPM2_RC_INITIALIZE	= 0x0100, /* RC_VER1 */
+ 	TPM2_RC_FAILURE		= 0x0101,
+ 	TPM2_RC_DISABLED	= 0x0120,
++	TPM2_RC_UPGRADE         = 0x012D,
+ 	TPM2_RC_COMMAND_CODE    = 0x0143,
+ 	TPM2_RC_TESTING		= 0x090A, /* RC_WARN */
+ 	TPM2_RC_REFERENCE_H0	= 0x0910,
+-- 
+2.7.4
+

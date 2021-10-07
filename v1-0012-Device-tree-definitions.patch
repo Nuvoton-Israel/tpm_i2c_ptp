@@ -1,0 +1,31 @@
+From cd0129be52f966b357339a6985809794e2f57962 Mon Sep 17 00:00:00 2001
+From: Amir Mizinski <amirmizi6@gmail.com>
+Date: Wed, 6 Oct 2021 17:10:42 +0300
+Subject: [PATCH v1 12/12] Device tree definitions
+
+Signed-off-by: Amir Mizinski <amirmizi6@gmail.com>
+---
+ arch/arm/boot/dts/bcm283x.dtsi | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/arch/arm/boot/dts/bcm283x.dtsi b/arch/arm/boot/dts/bcm283x.dtsi
+index e1abe8c..bc0d531 100644
+--- a/arch/arm/boot/dts/bcm283x.dtsi
++++ b/arch/arm/boot/dts/bcm283x.dtsi
+@@ -461,6 +461,13 @@
+ 			#address-cells = <1>;
+ 			#size-cells = <0>;
+ 			status = "disabled";
++
++			tpm@2e {
++				compatible = "nuvoton,npct75x", "tcg,tpm-tis-i2c";
++				reg = <0x2e>;
++				crc-checksum;
++				tpm-pirq = <&gpio 24 GPIO_ACTIVE_HIGH>;
++			};
+ 		};
+ 
+ 		vec: vec@7e806000 {
+-- 
+2.7.4
+

@@ -1,0 +1,72 @@
+From a3b4d67c2a94d4fb4350b5795c459345ee3fc578 Mon Sep 17 00:00:00 2001
+From: Amir Mizinski <amirmizi6@gmail.com>
+Date: Wed, 6 Oct 2021 16:59:56 +0300
+Subject: [PATCH v1 05/12] tpm: tpm_tis: Add verify_data_integrity handle to 
+ tpm_tis_phy_ops
+
+When using I2C bus protocol, the TPM has the ability to report data
+integrity on incoming or outgoing command parameter bytes.
+According to the TCG specs, if this data validation functionality is
+enabled via the TPM_DATA_CSUM_ENABLE register, the TPM will update the
+TPM_DATA_CSUM register after reception of the last command byte and after
+the last response byte has been read.
+
+Data integrity is checked if a "verify_data_integrity" handle is defined in
+"tpm_tis_phy_ops".
+
+Co-developed-by: Christophe Ricard <christophe-h.ricard@st.com>
+Signed-off-by: Christophe Ricard <christophe-h.ricard@st.com>
+Signed-off-by: Amir Mizinski <amirmizi6@gmail.com>
+---
+ drivers/char/tpm/tpm_tis_core.c | 14 ++++++++++++++
+ drivers/char/tpm/tpm_tis_core.h |  2 ++
+ 2 files changed, 16 insertions(+)
+
+diff --git a/drivers/char/tpm/tpm_tis_core.c b/drivers/char/tpm/tpm_tis_core.c
+index e136467..347c020 100644
+--- a/drivers/char/tpm/tpm_tis_core.c
++++ b/drivers/char/tpm/tpm_tis_core.c
+@@ -347,6 +347,13 @@ static int __tpm_tis_recv(struct tpm_chip *chip, u8 *buf, size_t count)
+ 		return size;
+ 	}
+ 
++	if (priv->phy_ops->verify_data_integrity)
++		if (!priv->phy_ops->verify_data_integrity(priv, buf,
++							  size)) {
++			size = -EIO;
++			return size;
++		}
++
+ 	return size;
+ }
+ 
+@@ -419,6 +426,13 @@ static int tpm_tis_send_data(struct tpm_chip *chip, const u8 *buf, size_t len)
+ 		return rc;
+ 	}
+ 
++	if (priv->phy_ops->verify_data_integrity) {
++		if (!priv->phy_ops->verify_data_integrity(priv, buf, len)) {
++			rc = -EIO;
++			return rc;
++		}
++	}
++
+ 	return 0;
+ }
+ 
+diff --git a/drivers/char/tpm/tpm_tis_core.h b/drivers/char/tpm/tpm_tis_core.h
+index 6cc6b76..cd97c01 100644
+--- a/drivers/char/tpm/tpm_tis_core.h
++++ b/drivers/char/tpm/tpm_tis_core.h
+@@ -107,6 +107,8 @@ struct tpm_tis_phy_ops {
+ 	int (*read16)(struct tpm_tis_data *data, u32 addr, u16 *result);
+ 	int (*read32)(struct tpm_tis_data *data, u32 addr, u32 *result);
+ 	int (*write32)(struct tpm_tis_data *data, u32 addr, u32 src);
++	bool (*verify_data_integrity)(struct tpm_tis_data *data, const u8 *buf,
++				      size_t len);
+ };
+ 
+ static inline int tpm_tis_read_bytes(struct tpm_tis_data *data, u32 addr,
+-- 
+2.7.4
+

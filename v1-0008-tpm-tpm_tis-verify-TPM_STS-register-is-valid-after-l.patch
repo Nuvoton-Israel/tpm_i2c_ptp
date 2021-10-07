@@ -1,0 +1,45 @@
+From 5f5500a15adeecd8c122761688aff3b5fa4b46e5 Mon Sep 17 00:00:00 2001
+From: Amir Mizinski <amirmizi6@gmail.com>
+Date: Wed, 6 Oct 2021 17:05:28 +0300
+Subject: [PATCH v1 08/12] tpm: tpm_tis: verify TPM_STS register is valid after
+  locality request
+
+Issue could result when the TPM does not update TPM_STS register after
+a locality request (TPM_STS Initial value = 0xFF) and a TPM_STS register
+read occurs (tpm_tis_status(chip)).
+
+Checking the next condition("if ((status & TPM_STS_COMMAND_READY) == 0)"),
+the status will be at 0xFF and will be considered, wrongly, in "Ready"
+state (by checking only one bit). However, at this moment the TPM is, in
+fact, in "Idle" state and remains in "Idle" state because
+"tpm_tis_ready(chip);" was not executed.
+
+Suggested-by: Benoit Houyere <benoit.houyere@st.com>
+Signed-off-by: Amir Mizinski <amirmizi6@gmail.com>
+---
+ drivers/char/tpm/tpm_tis_core.c | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/char/tpm/tpm_tis_core.c b/drivers/char/tpm/tpm_tis_core.c
+index a38465f..b876db2 100644
+--- a/drivers/char/tpm/tpm_tis_core.c
++++ b/drivers/char/tpm/tpm_tis_core.c
+@@ -221,8 +221,14 @@ static int request_locality(struct tpm_chip *chip, int l)
+ 	} else {
+ 		/* wait for burstcount */
+ 		do {
+-			if (check_locality(chip, l))
++			if (check_locality(chip, l)) {
++				if (wait_for_tpm_stat(chip, TPM_STS_GO, 0,
++						      chip->timeout_c,
++						      &priv->int_queue,
++						      false) < 0)
++					return -ETIME;
+ 				return l;
++			}
+ 			tpm_msleep(TPM_TIMEOUT);
+ 		} while (time_before(jiffies, stop));
+ 	}
+-- 
+2.7.4
+

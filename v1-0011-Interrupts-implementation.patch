@@ -1,0 +1,435 @@
+From 1e28a906a0ea006ee39e7a4b095f569ce9560ad7 Mon Sep 17 00:00:00 2001
+From: Amir Mizinski <amirmizi6@gmail.com>
+Date: Wed, 6 Oct 2021 17:09:47 +0300
+Subject: [PATCH v1 11/12] Interrupts implementation
+
+Signed-off-by: Amir Mizinski <amirmizi6@gmail.com>
+
+Signed-off-by: Amir Mizinski <amirmizi6@gmail.com>
+---
+ drivers/char/tpm/tpm_tis_core.c |  64 +++++++++++++-----
+ drivers/char/tpm/tpm_tis_core.h |   8 +++
+ drivers/char/tpm/tpm_tis_i2c.c  | 139 ++++++++++++++++++++++++++++++++++++++--
+ include/linux/tpm.h             |   1 +
+ 4 files changed, 191 insertions(+), 21 deletions(-)
+
+diff --git a/drivers/char/tpm/tpm_tis_core.c b/drivers/char/tpm/tpm_tis_core.c
+index b876db2..a3df78d 100644
+--- a/drivers/char/tpm/tpm_tis_core.c
++++ b/drivers/char/tpm/tpm_tis_core.c
+@@ -30,10 +30,16 @@
+ static void tpm_tis_clkrun_enable(struct tpm_chip *chip, bool value);
+ 
+ static bool wait_for_tpm_stat_cond(struct tpm_chip *chip, u8 mask,
+-					bool check_cancel, bool *canceled)
++				   u8 mask_result, bool check_cancel,
++				   bool *canceled)
+ {
+-	u8 status = chip->ops->status(chip);
++	u8 status;
++	struct tpm_tis_data *priv = dev_get_drvdata(&chip->dev);
+ 
++	if (priv->phy_ops->status_cond)
++		return priv->phy_ops->status_cond(chip, mask, mask_result, check_cancel,
++						  canceled);
++	status = chip->ops->status(chip);
+ 	*canceled = false;
+ 	if ((status & mask) == mask)
+ 		return true;
+@@ -53,20 +59,20 @@ static int tpm_tis_wait_for_stat(struct tpm_chip *chip, u8 mask, u8 stat,
+ 	u8 status;
+ 	bool canceled = false;
+ 
+-	/* check current status */
+-	status = chip->ops->status(chip);
+-	if ((status & mask) == stat)
+-		return 0;
++	if (!(chip->flags & TPM_CHIP_FLAG_I2C)) {
++		/* check current status */
++		status = chip->ops->status(chip);
++		if ((status & mask) == stat)
++			return 0;
++	}
+ 
+-	stop = jiffies + timeout;
+ 
+ 	if (chip->flags & TPM_CHIP_FLAG_IRQ) {
+ again:
+-		timeout = stop - jiffies;
+ 		if ((long)timeout <= 0)
+ 			return -ETIME;
+ 		rc = wait_event_interruptible_timeout(*queue,
+-			wait_for_tpm_stat_cond(chip, mask, check_cancel,
++			wait_for_tpm_stat_cond(chip, mask, stat, check_cancel,
+ 					       &canceled),
+ 			timeout);
+ 		if (rc > 0) {
+@@ -79,11 +85,12 @@ static int tpm_tis_wait_for_stat(struct tpm_chip *chip, u8 mask, u8 stat,
+ 			goto again;
+ 		}
+ 	} else {
++		stop = jiffies + timeout;
+ 		do {
+ 			usleep_range(TPM_TIMEOUT_USECS_MIN,
+ 				     TPM_TIMEOUT_USECS_MAX);
+ 			status = chip->ops->status(chip);
+-			if ((status & mask) == stat)
++			if (status != 0xff && ((status & mask) == stat))
+ 				return 0;
+ 		} while (time_before(jiffies, stop));
+ 	}
+@@ -108,7 +115,7 @@ static int wait_startup(struct tpm_chip *chip, int l)
+ 		if (rc < 0)
+ 			return rc;
+ 
+-		if (access & TPM_ACCESS_VALID)
++		if (access != 0xff && (access & TPM_ACCESS_VALID))
+ 			return 0;
+ 		tpm_msleep(TPM_TIMEOUT);
+ 	} while (time_before(jiffies, stop));
+@@ -222,7 +229,7 @@ static int request_locality(struct tpm_chip *chip, int l)
+ 		/* wait for burstcount */
+ 		do {
+ 			if (check_locality(chip, l)) {
+-				if (wait_for_tpm_stat(chip, TPM_STS_GO, 0,
++				if (tpm_tis_wait_for_stat(chip, TPM_STS_GO, 0,
+ 						      chip->timeout_c,
+ 						      &priv->int_queue,
+ 						      false) < 0)
+@@ -400,6 +407,8 @@ static int tpm_tis_send_data(struct tpm_chip *chip, const u8 *buf, size_t len)
+ 
+ 	status = tpm_tis_status(chip);
+ 	if ((status & TPM_STS_COMMAND_READY) == 0) {
++		if (chip->flags & TPM_CHIP_FLAG_I2C)
++			priv->cur_intrs = priv->intrs;
+ 		tpm_tis_ready(chip);
+ 		if (tpm_tis_wait_for_stat(chip, TPM_STS_COMMAND_READY,
+ 					  TPM_STS_COMMAND_READY,
+@@ -481,6 +490,8 @@ static int tpm_tis_send_main(struct tpm_chip *chip, const u8 *buf, size_t len)
+ 		goto out_err;
+ 
+ 	/* go and do it */
++	if (chip->flags & TPM_CHIP_FLAG_I2C)
++		priv->cur_intrs = priv->intrs;
+ 	rc = tpm_tis_write8(priv, TPM_STS(priv->locality), TPM_STS_GO);
+ 	if (rc < 0)
+ 		goto out_err;
+@@ -522,6 +533,8 @@ static int tpm_tis_send(struct tpm_chip *chip, u8 *buf, size_t len)
+ 		tpm_msleep(1);
+ 	if (!priv->irq_tested)
+ 		disable_interrupts(chip);
++	else if (chip->flags & TPM_CHIP_FLAG_I2C)
++		priv->cur_intrs--;
+ 	priv->irq_tested = true;
+ 	return rc;
+ }
+@@ -722,6 +735,9 @@ static irqreturn_t tis_int_handler(int dummy, void *dev_id)
+ 	u32 interrupt;
+ 	int i, rc;
+ 
++	if (priv->phy_ops->int_handler)
++		return priv->phy_ops->int_handler(dev_id);
++
+ 	rc = tpm_tis_read32(priv, TPM_INT_STATUS(priv->locality), &interrupt);
+ 	if (rc < 0)
+ 		return IRQ_NONE;
+@@ -750,7 +766,7 @@ static irqreturn_t tis_int_handler(int dummy, void *dev_id)
+ 	return IRQ_HANDLED;
+ }
+ 
+-static int tpm_tis_gen_interrupt(struct tpm_chip *chip)
++int tpm_tis_gen_interrupt(struct tpm_chip *chip)
+ {
+ 	const char *desc = "attempting to generate an interrupt";
+ 	u32 cap2;
+@@ -762,6 +778,7 @@ static int tpm_tis_gen_interrupt(struct tpm_chip *chip)
+ 		return tpm1_getcap(chip, TPM_CAP_PROP_TIS_TIMEOUT, &cap, desc,
+ 				  0);
+ }
++EXPORT_SYMBOL_GPL(tpm_tis_gen_interrupt);
+ 
+ /* Register the IRQ and issue a command that will cause an interrupt. If an
+  * irq is seen then leave the chip setup for IRQ operation, otherwise reverse
+@@ -775,6 +792,10 @@ static int tpm_tis_probe_irq_single(struct tpm_chip *chip, u32 intmask,
+ 	int rc;
+ 	u32 int_status;
+ 
++	if (priv->phy_ops->probe_irq_single)
++		return priv->phy_ops->probe_irq_single(chip, intmask,
++						       tis_int_handler, irq);
++
+ 	if (devm_request_irq(chip->dev.parent, irq, tis_int_handler, flags,
+ 			     dev_name(&chip->dev), chip) != 0) {
+ 		dev_info(&chip->dev, "Unable to request irq: %d for probe\n",
+@@ -820,8 +841,8 @@ static int tpm_tis_probe_irq_single(struct tpm_chip *chip, u32 intmask,
+ 	 * will call disable_irq which undoes all of the above.
+ 	 */
+ 	if (!(chip->flags & TPM_CHIP_FLAG_IRQ)) {
+-		rc = tpm_tis_write8(priv, original_int_vec,
+-				TPM_INT_VECTOR(priv->locality));
++		rc = tpm_tis_write8(priv, TPM_INT_VECTOR(priv->locality),
++				    original_int_vec);
+ 		if (rc < 0)
+ 			return rc;
+ 
+@@ -975,6 +996,7 @@ int tpm_tis_core_init(struct device *dev, struct tpm_tis_data *priv, int irq,
+ 	chip->timeout_c = msecs_to_jiffies(TIS_TIMEOUT_C_MAX);
+ 	chip->timeout_d = msecs_to_jiffies(TIS_TIMEOUT_D_MAX);
+ 	priv->phy_ops = phy_ops;
++	priv->intrs = 0;
+ 	dev_set_drvdata(&chip->dev, priv);
+ 
+ 	if (is_bsw()) {
+@@ -1080,13 +1102,21 @@ int tpm_tis_core_init(struct device *dev, struct tpm_tis_data *priv, int irq,
+ 		if (irq) {
+ 			tpm_tis_probe_irq_single(chip, intmask, IRQF_SHARED,
+ 						 irq);
+-			if (!(chip->flags & TPM_CHIP_FLAG_IRQ))
++			if (!(chip->flags & TPM_CHIP_FLAG_IRQ)) {
+ 				dev_err(&chip->dev, FW_BUG
+-					"TPM interrupt not working, polling instead\n");
++					"tpm interrupt error, tpm is using polling mode\n");
++			}
++			else {
++				dev_info(&chip->dev, "tpm is using interrupt mode\n");
++			}
+ 		} else {
+ 			tpm_tis_probe_irq(chip, intmask);
++			dev_info(&chip->dev, "tpm interrupt port is invalid \ntpm is using polling mode\n");
+ 		}
+ 	}
++	else {
++		dev_info(&chip->dev, "tpm interrupts was not enabled\ntpm is using polling mode");
++	}
+ 
+ 	rc = tpm_chip_register(chip);
+ 	if (rc)
+diff --git a/drivers/char/tpm/tpm_tis_core.h b/drivers/char/tpm/tpm_tis_core.h
+index cd97c01..11a031b 100644
+--- a/drivers/char/tpm/tpm_tis_core.h
++++ b/drivers/char/tpm/tpm_tis_core.h
+@@ -96,6 +96,8 @@ struct tpm_tis_data {
+ 	wait_queue_head_t int_queue;
+ 	wait_queue_head_t read_queue;
+ 	const struct tpm_tis_phy_ops *phy_ops;
++	unsigned int intrs;
++	unsigned int cur_intrs;
+ 	unsigned short rng_quality;
+ };
+ 
+@@ -109,6 +111,11 @@ struct tpm_tis_phy_ops {
+ 	int (*write32)(struct tpm_tis_data *data, u32 addr, u32 src);
+ 	bool (*verify_data_integrity)(struct tpm_tis_data *data, const u8 *buf,
+ 				      size_t len);
++	bool (*status_cond)(struct tpm_chip *chip, u8 mask, u8 mask_result,
++			    bool check_cancel, bool *canceled);
++	irqreturn_t (*int_handler)(void *dev_id);
++	int (*probe_irq_single)(struct tpm_chip *chip, u32 intmask,
++				irq_handler_t tis_int_handler, int irq);
+ };
+ 
+ static inline int tpm_tis_read_bytes(struct tpm_tis_data *data, u32 addr,
+@@ -192,6 +199,7 @@ static inline bool is_bsw(void)
+ #endif
+ }
+ 
++int tpm_tis_gen_interrupt(struct tpm_chip *chip);
+ void tpm_tis_remove(struct tpm_chip *chip);
+ int tpm_tis_core_init(struct device *dev, struct tpm_tis_data *priv, int irq,
+ 		      const struct tpm_tis_phy_ops *phy_ops,
+diff --git a/drivers/char/tpm/tpm_tis_i2c.c b/drivers/char/tpm/tpm_tis_i2c.c
+index 4c9bad0..7212012 100644
+--- a/drivers/char/tpm/tpm_tis_i2c.c
++++ b/drivers/char/tpm/tpm_tis_i2c.c
+@@ -36,7 +36,7 @@
+ #define TPM_I2C_DID_VID                        0x48
+ #define TPM_I2C_RID                    0x4C
+ 
+-//#define I2C_IS_TPM2 1
++#define I2C_IS_TPM2 1
+ 
+ struct tpm_tis_i2c_phy {
+ 	struct tpm_tis_data priv;
+@@ -185,6 +185,117 @@ static bool tpm_tis_i2c_verify_data_integrity(struct tpm_tis_data *data,
+ 	return true;
+ }
+ 
++
++static bool wait_for_tpm_i2c_stat_cond(struct tpm_chip *chip, u8 mask, u8 mask_result,
++                                        bool check_cancel, bool *canceled)
++{
++	struct tpm_tis_data *priv = dev_get_drvdata(&chip->dev);
++	u8 status;
++	u32 interrupt;
++	int rc;
++
++	if((mask != (TPM_STS_DATA_AVAIL | TPM_STS_VALID)) &&
++		    (mask != TPM_STS_COMMAND_READY)){
++		status = chip->ops->status(chip);
++		if (status != 0xff && ((status & mask) == mask_result))
++			return true;
++	}
++
++	if(priv->cur_intrs == priv->intrs)
++	return false;
++
++	status = chip->ops->status(chip);
++	*canceled = false;
++
++	if (status != 0xff && ((status & mask) == mask)){
++		/* Clear interrupts handled with TPM_EOI */
++		rc = tpm_tis_read32(priv, TPM_INT_STATUS(priv->locality),
++				    &interrupt);
++		if (rc < 0) {
++			dev_err(&chip->dev,
++				"%s() fail to read TPM_INT_STATUS\n", __func__);
++			return -EIO;
++		}
++
++		rc = tpm_tis_write32(priv, TPM_INT_STATUS(priv->locality),
++				     interrupt);
++		if (rc < 0) {
++			dev_err(&chip->dev,
++				"%s() fail to clear int status\n", __func__);
++			return -EIO;
++		}
++			return true;
++	}
++	if (check_cancel && chip->ops->req_canceled(chip, status)) {
++		*canceled = true;
++		return true;
++	}
++	return false;
++}
++
++static irqreturn_t tis_i2c_int_handler(void *dev_id)
++{
++        struct tpm_chip *chip = dev_id;
++        struct tpm_tis_data *priv = dev_get_drvdata(&chip->dev);
++
++        priv->irq_tested = true;
++        wake_up_interruptible(&priv->read_queue);
++        priv->intrs++;
++        return IRQ_HANDLED;
++}
++
++static int tpm_tis_i2c_probe_irq_single(struct tpm_chip *chip, u32 intmask,
++					irq_handler_t tis_int_handler, int irq)
++{
++        struct tpm_tis_data *priv = dev_get_drvdata(&chip->dev);
++        int rc;
++        u32 int_status;
++
++	if (devm_request_irq(chip->dev.parent, irq, tis_int_handler,
++			     IRQF_TRIGGER_FALLING, dev_name(&chip->dev),
++			     chip) != 0) {
++                dev_info(&chip->dev, "Unable to request irq: %d for probe\n",
++                         irq);
++                return -1;
++        }
++	priv->irq = irq;
++	chip->flags |= TPM_CHIP_FLAG_IRQ | TPM_CHIP_FLAG_I2C;
++
++	/* Get interrupt capabilty for i2c */
++	rc = tpm_tis_read32(priv, TPM_INTF_CAPS(priv->locality), &intmask);
++
++	rc = tpm_tis_read32(priv, TPM_INT_STATUS(priv->locality), &int_status);
++        if (rc < 0)
++                return rc;
++
++	/* Clear all existing */
++        rc = tpm_tis_write32(priv, TPM_INT_STATUS(priv->locality), int_status);
++        if (rc < 0)
++                return rc;
++
++	/* Turn on */
++        rc = tpm_tis_write32(priv, TPM_INT_ENABLE(priv->locality),
++                             intmask | TPM_GLOBAL_INT_ENABLE);
++        if (rc < 0)
++                return rc;
++
++	priv->irq_tested = false;
++
++        /* Generate an interrupt by having the core call through to
++         * tpm_tis_send
++         */
++	rc = tpm_chip_start(chip);
++        rc = tpm_tis_gen_interrupt(chip);
++        if (rc < 0)
++                return rc;
++
++        tpm_chip_stop(chip);
++	/* tpm_tis_send will either confirm the interrupt is working or it
++         * will call disable_irq which undoes all of the above.
++         */
++	return 0;
++}
++
+ static SIMPLE_DEV_PM_OPS(tpm_tis_pm, tpm_pm_suspend, tpm_tis_resume);
+ 
+ static int csum_state_store(struct tpm_tis_data *data, u8 new_state)
+@@ -213,13 +324,16 @@ static const struct tpm_tis_phy_ops tpm_i2c_phy_ops = {
+ 	.read_bytes = tpm_tis_i2c_read_bytes,
+ 	.write_bytes = tpm_tis_i2c_write_bytes,
+ 	.verify_data_integrity = tpm_tis_i2c_verify_data_integrity,
++	.status_cond = wait_for_tpm_i2c_stat_cond,
++	.int_handler = tis_i2c_int_handler,
++	.probe_irq_single = tpm_tis_i2c_probe_irq_single,
+ };
+ 
+ static int tpm_tis_i2c_probe(struct i2c_client *dev,
+ 			     const struct i2c_device_id *id)
+ {
+ 	struct tpm_tis_i2c_phy *phy;
+-	int rc;
++	int rc, gpio, irq = -1;
+ 	int crc_checksum = 0;
+ 	const u8 loc_init = 0;
+ 	struct device_node *np;
+@@ -251,12 +365,29 @@ static int tpm_tis_i2c_probe(struct i2c_client *dev,
+ 	if (rc < 0)
+ 		return rc;
+ 
+-	return tpm_tis_core_init(&dev->dev, &phy->priv, -1, &tpm_i2c_phy_ops,
++	// Get interrupt from board device
++	if (dev->irq) {
++		irq = dev->irq;
++		goto out;
++	}
++
++	// If IRQ doesn't exists, get GPIO from device tree
++	gpio = of_get_named_gpio(np, "tpm-pirq", 0);
++	if (gpio < 0) {
++		dev_err(&dev->dev, "Failed to retrieve tpm-pirq\n");
++		dev_info(&dev->dev, "gpio = %d", gpio);
++		goto out;
++	}
++
++	irq = gpio_to_irq(gpio);
++out:
++	return tpm_tis_core_init(&dev->dev, &phy->priv, irq, &tpm_i2c_phy_ops,
+ 					NULL);
+ }
+ 
+ static const struct i2c_device_id tpm_tis_i2c_id[] = {
+-	{"tpm_tis_i2c", 0},
++	{"tpm_tis_i2c"},
++	{"tpm_tis_i2c", .driver_data = I2C_IS_TPM2},
+ 	{}
+ };
+ MODULE_DEVICE_TABLE(i2c, tpm_tis_i2c_id);
+diff --git a/include/linux/tpm.h b/include/linux/tpm.h
+index 5a2e031..4093170 100644
+--- a/include/linux/tpm.h
++++ b/include/linux/tpm.h
+@@ -270,6 +270,7 @@ enum tpm_chip_flags {
+ 	TPM_CHIP_FLAG_HAVE_TIMEOUTS	= BIT(4),
+ 	TPM_CHIP_FLAG_ALWAYS_POWERED	= BIT(5),
+ 	TPM_CHIP_FLAG_FIRMWARE_POWER_MANAGED	= BIT(6),
++	TPM_CHIP_FLAG_I2C		= BIT(7),
+ };
+ 
+ #define to_tpm_chip(d) container_of(d, struct tpm_chip, dev)
+-- 
+2.7.4
+

@@ -1,0 +1,42 @@
+From 76d05cfbaa7a518d96651815a540cad83714ad59 Mon Sep 17 00:00:00 2001
+From: Amir Mizinski <amirmizi6@gmail.com>
+Date: Wed, 6 Oct 2021 16:41:20 +0300
+Subject: [PATCH v1 01/12] tpm2: add longer timeout for verify signature
+ command
+
+While running a TPM2_CC_VERIFY_SIGNATURE operation with RSA 3072-bit
+keys the TPM driver fails with the following error:
+
+"kernel: [ 2416.187522] tpm tpm0: Operation Timed out"
+
+Since the TPM PC Client specification does not specify a number for
+verify signature operation timeout, and the duration of
+TPM2_CC_VERIFY_SIGNATURE with RSA 3072-bit keys exceeds the current timeout
+of TPM_LONG (2 seconds), it is preferable to pick the longest timeout
+possible.
+
+Therefore, set the duration for TPM2_CC_VERIFY_SIGNATUE to TPM_LONG_LONG
+(5 minutes).
+
+Link: https://trustedcomputinggroup.org/resource/pc-client-specific-platform-firmware-profile-specification/
+Signed-off-by: Amir Mizinski <amirmizi6@gmail.com>
+---
+ drivers/char/tpm/tpm2-cmd.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/drivers/char/tpm/tpm2-cmd.c b/drivers/char/tpm/tpm2-cmd.c
+index 7603295..e71154b 100644
+--- a/drivers/char/tpm/tpm2-cmd.c
++++ b/drivers/char/tpm/tpm2-cmd.c
+@@ -87,7 +87,7 @@ static u8 tpm2_ordinal_duration_index(u32 ordinal)
+ 		return TPM_MEDIUM;
+ 
+ 	case TPM2_CC_VERIFY_SIGNATURE:        /* 177 */
+-		return TPM_LONG;
++		return TPM_LONG_LONG;
+ 
+ 	case TPM2_CC_PCR_EXTEND:              /* 182 */
+ 		return TPM_MEDIUM;
+-- 
+2.7.4
+
